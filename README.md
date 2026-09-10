@@ -82,16 +82,48 @@ O corpus rotula **condições médicas** (5 classes), não urgência. A urgênci
 ## Modelo
 
 ```bash
-make train       # treina, avalia e grava models/model.pkl + models/metrics.json
+make train       # treina, calibra a trava de urgência e grava os artefatos em models/
 ```
 
 Pipeline `TfidfVectorizer` (1-2 gramas, 50.000 termos) + `LogisticRegression` com
-`class_weight="balanced"`. A métrica de decisão é o **f1-macro**, não a acurácia: com
-classes desbalanceadas e custo assimétrico de errar um `urgente`, a acurácia esconderia
-recall ruim justamente na classe que mais importa.
+`class_weight="balanced"`.
 
-O treino falha (exit 1) se o f1-macro ficar abaixo de `TRIAGE_MIN_F1_MACRO` — é o gate de
-qualidade que a DAG de retreino usa para não publicar um modelo pior que o vigente.
+**O treino tem como alvo as 5 condições médicas, não os 3 níveis de urgência.** Colapsar
+as classes antes do treino apaga a fronteira entre condições de vocabulário distinto e
+custa sinal: medido por validação cruzada, treinar nas 5 condições e projetar depois rende
+f1-macro 0,590 contra 0,573 do treino direto em 3 classes.
+
+A projeção para urgência acontece numa **regra de decisão** de duas partes:
+
+1. **condição dominante** — a urgência é a da condição mais provável;
+2. **trava de urgência** — se a probabilidade acumulada nas condições urgentes passa de um
+   limiar, o laudo vira `urgente` mesmo sem condição urgente dominante.
+
+O limiar é **calibrado a cada treino**, sobre probabilidades out-of-fold, como o maior
+valor que ainda captura `TRIAGE_URGENT_RECALL_TARGET` (padrão: 90%) dos laudos urgentes.
+Ele viaja junto do artefato em `models/decision.json` e é exposto em `/model-info`.
+
+### Métricas (teste, n=2.888)
+
+| Métrica | Valor |
+|---|---|
+| **Recall de `urgente`** | **0,8986** |
+| Precisão de `urgente` | 0,6372 |
+| Acurácia | 0,6170 |
+| f1-macro | 0,5614 |
+
+**Recall de `urgente` é a métrica de decisão**, não a acurácia nem o f1-macro. As duas
+últimas tratam todos os erros como equivalentes, o que é falso numa triagem: um laudo
+urgente classificado como normal deixa um paciente esperando, enquanto o erro oposto só
+consome tempo de um revisor.
+
+O preço é super-triagem: o recall de `normal` é 0,225, ou seja, a fila prioritária fica
+inflada de falsos alarmes. Esse ponto de operação é uma decisão institucional, e por isso
+mora na configuração e não no código. Análise completa em
+[docs/model_card.md](docs/model_card.md).
+
+O treino falha (exit 1) se o recall de `urgente` cair abaixo de 0,85 ou o f1-macro abaixo
+de 0,52 — são os gates que impedem a DAG de retreino de publicar um modelo pior.
 
 > O corpus é composto por **abstracts de artigos científicos** (~1.200 caracteres), não por
 > notas clínicas. O modelo espera texto desse formato; frases curtas de prontuário estão
@@ -122,12 +154,18 @@ curl -X POST http://localhost:8000/predict \
 {
   "urgencia": "urgente",
   "descricao": "Priorizar avaliação imediata; risco de desfecho grave.",
-  "confianca": 0.709,
-  "probabilidades": {"atencao": 0.152, "normal": 0.139, "urgente": 0.709},
+  "confianca": 0.87,
+  "probabilidades": {"atencao": 0.081, "normal": 0.049, "urgente": 0.87},
+  "regra": "condicao_dominante",
   "latencia_ms": 1.51,
   "backend": "sklearn"
 }
 ```
+
+O campo `regra` diz **por que** o laudo recebeu aquele nível: `condicao_dominante` quando
+o diagnóstico mais provável já é grave, `trava_de_urgencia` quando a incerteza distribuída
+entre condições urgentes disparou a trava. Uma triagem precisa ser auditável — os dois
+casos têm significados clínicos diferentes e merecem leituras diferentes pelo revisor.
 
 Se o artefato de modelo não estiver presente, o serviço **sobe mesmo assim**: `/health`
 reporta `model_loaded: false` e `/predict` responde 503. Um container que morre no boot
@@ -144,12 +182,13 @@ Linha de base medida na Etapa 1, com 1.000 requisições sobre laudos reais do s
 
 | Medição | p50 | p95 | p99 | Vazão |
 |---|---|---|---|---|
-| Modelo (em processo) | 0,751 ms | 0,888 ms | 0,997 ms | 1.322 req/s |
-| HTTP (container Docker) | 1,426 ms | 1,759 ms | 2,100 ms | 685 req/s |
+| Modelo (em processo) | 0,895 ms | 1,073 ms | 1,208 ms | 1.103 req/s |
+| HTTP (container Docker) | 2,071 ms | 3,656 ms | 4,478 ms | 434 req/s |
 
-O alvo de p95 < 100 ms já é cumprido com folga de 56× **antes** de qualquer otimização —
-e metade do tempo de resposta não é o modelo, e sim serialização, validação e rede.
-Detalhes e implicações para a Etapa 4 em [docs/latency_report.md](docs/latency_report.md).
+O alvo de p95 < 100 ms já é cumprido com folga de 27× **antes** de qualquer otimização —
+e mais da metade do tempo de resposta não é o modelo, e sim serialização, validação e rede.
+Detalhes, variância entre execuções e implicações para a Etapa 4 em
+[docs/latency_report.md](docs/latency_report.md).
 
 ## Licença
 
