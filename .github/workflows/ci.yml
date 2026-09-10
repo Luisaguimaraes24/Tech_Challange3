@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+# Um push novo na mesma branch cancela a execução anterior: não faz sentido gastar
+# runner validando um commit que já foi substituído.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  UV_VERSION: "0.12.12"
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  lint:
+    name: Lint e formatação
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Instalar dependências
+        run: uv sync --all-extras --frozen
+
+      - name: Verificar estilo
+        run: uv run ruff check --output-format=github .
+
+      - name: Verificar formatação
+        run: uv run ruff format --check .
+
+  test:
+    name: Testes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      - name: Instalar dependências
+        run: uv sync --all-extras --frozen
+
+      # A suíte roda sobre a fixture versionada em tests/fixtures/, sem tocar o Kaggle:
+      # um CI que depende de download externo falha por motivo que não é o código.
+      - name: Rodar testes
+        run: uv run pytest --cov=src/triage --cov-report=term-missing --cov-report=xml
+
+      - name: Publicar relatório de cobertura
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage
+          path: coverage.xml
+          retention-days: 7
+
+  build:
+    name: Build da imagem
+    runs-on: ubuntu-latest
+    # Só vale gastar tempo construindo imagem depois que o código passou nos dois gates.
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configurar Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Construir a imagem da API
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: triage-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Construir não prova nada: a imagem precisa subir e responder. Aqui ela sobe sem
+      # artefato de modelo, então o esperado é justamente o modo degradado.
+      - name: Verificar que o container sobe e responde
+        run: |
+          docker run -d --name triage-ci -p 8000:8000 triage-api:ci
+          for attempt in $(seq 1 30); do
+            if curl -sf http://localhost:8000/health > /dev/null; then
+              echo "API respondeu na tentativa $attempt"
+              curl -s http://localhost:8000/health
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "A API não respondeu em 60s"
+          docker logs triage-ci
+          exit 1
+
+      - name: Encerrar o container
+        if: always()
+        run: docker rm -f triage-ci || true
+
+  dag:
+    name: Validação da DAG
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+
+      # O Airflow não entra no ambiente do projeto: ele roda em container próprio e
+      # arrastaria dezenas de dependências para o venv de desenvolvimento. Aqui ele é
+      # instalado isolado, só para provar que a DAG carrega sem erro de import ou ciclo.
+      - name: Validar que a DAG carrega
+        run: |
+          uv run --isolated --no-project \
+            --with "apache-airflow==3.1.3" \
+            --python 3.11 \
+            python scripts/validate_dag.py
