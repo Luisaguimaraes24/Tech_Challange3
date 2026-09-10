@@ -141,10 +141,13 @@ class Predictor:
                 f"Backend de inferência desconhecido: {backend_name!r}. Disponível: 'sklearn'."
             )
 
+        metrics = _load_metrics(settings.metrics_path)
+        _warn_on_environment_drift(metrics)
+
         return cls(
             backend=backend,
             rule=_load_decision_rule(settings.decision_path, backend.condition_classes),
-            metrics=_load_metrics(settings.metrics_path),
+            metrics=metrics,
         )
 
     @property
@@ -221,6 +224,31 @@ def _load_decision_rule(decision_path: Path, condition_classes: list[int]) -> De
         rule.recall_target,
     )
     return rule
+
+
+def _warn_on_environment_drift(metrics: dict | None) -> None:
+    """Alerta quando o modelo foi treinado com versões diferentes das que vão servi-lo.
+
+    O pickle do scikit-learn não é estável entre versões: a própria biblioteca trata a
+    desserialização cruzada como uso por conta e risco. A divergência costuma nascer de
+    duas imagens que resolvem dependências separadamente, e o sintoma pode ser um
+    resultado sutilmente errado em vez de uma exceção — daí valer um aviso explícito.
+
+    Args:
+        metrics: Métricas do artefato, contendo o ambiente de treino.
+    """
+    if not metrics or not (treino := metrics.get("environment")):
+        return
+
+    import sklearn
+
+    if (versao_treino := treino.get("scikit_learn")) and versao_treino != sklearn.__version__:
+        logger.warning(
+            "Modelo treinado com scikit-learn %s, mas o serviço roda %s. "
+            "A desserialização entre versões não é garantida; realinhe as imagens.",
+            versao_treino,
+            sklearn.__version__,
+        )
 
 
 def _load_metrics(metrics_path: Path) -> dict | None:

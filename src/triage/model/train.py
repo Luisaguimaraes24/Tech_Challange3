@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import platform
 import sys
 import time
 from pathlib import Path
@@ -61,6 +62,22 @@ CLASSIFIER_PARAMS = {
 
 CALIBRATION_FOLDS = 3
 """Folds usados para gerar as probabilidades out-of-fold que calibram o limiar."""
+
+
+def training_environment() -> dict[str, str]:
+    """Descreve as versões que produziram o artefato.
+
+    Returns:
+        Versões de Python, scikit-learn e numpy usadas no treino.
+    """
+    import numpy
+    import sklearn
+
+    return {
+        "python": platform.python_version(),
+        "scikit_learn": sklearn.__version__,
+        "numpy": numpy.__version__,
+    }
 
 
 def build_pipeline() -> Pipeline:
@@ -156,6 +173,9 @@ def train(
     metrics["vocabulary_size"] = len(pipeline.named_steps["tfidf"].vocabulary_)
     metrics["decision_rule"] = rule.to_dict()
     metrics["threshold_calibration"] = calibration
+    # O ambiente de treino viaja com o artefato: pickle do scikit-learn não é estável
+    # entre versões, e quem carrega o modelo precisa poder detectar a divergência.
+    metrics["environment"] = training_environment()
 
     model_path.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(pipeline, model_path)
