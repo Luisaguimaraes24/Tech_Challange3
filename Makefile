@@ -35,11 +35,26 @@ test:  ## Roda a suíte de testes com cobertura
 train:  ## Treina o classificador de urgência
 	$(PY) -m triage.model.train
 
-up:  ## Sobe a stack completa (API + Prometheus + Grafana + Airflow)
+# O Airflow precisa escrever nos bind mounts ./data e ./models, que pertencem ao
+# usuário do host; sem isso o container roda como uid 50000 e a DAG falha ao gravar.
+export AIRFLOW_UID := $(shell id -u)
+
+up:  ## Sobe a stack completa (API + Airflow)
 	docker compose up -d --build
 
 down:  ## Derruba a stack
 	docker compose down
+
+logs:  ## Acompanha os logs da stack
+	docker compose logs -f
+
+dag:  ## Dispara a DAG de treino e acompanha o resultado
+	docker compose exec airflow airflow dags unpause triage_training
+	docker compose exec airflow airflow dags trigger triage_training
+
+validate-dag:  ## Verifica que a DAG carrega, sem subir o Airflow
+	$(UV) run --isolated --no-project --with "apache-airflow==3.2.2" --python 3.11 \
+		python scripts/validate_dag.py
 
 clean:  ## Remove caches e artefatos temporários
 	rm -rf .pytest_cache .ruff_cache .coverage htmlcov

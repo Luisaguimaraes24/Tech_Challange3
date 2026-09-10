@@ -1,0 +1,42 @@
+# Imagem do Airflow com o pacote `triage` instalado.
+#
+# A DAG importa `triage.model.train` e `triage.data.loader` diretamente, então o pacote
+# precisa estar no ambiente do worker. A alternativa — instalar em tempo de execução
+# dentro da tarefa — deixaria a DAG dependente de rede a cada run e esconderia falhas de
+# dependência no log da tarefa em vez de no build.
+#
+# O Airflow NÃO entra no ambiente de desenvolvimento do projeto: ele arrastaria dezenas
+# de pacotes para o venv e conflitaria com as versões de scikit-learn e pandas que o
+# treino usa. Ele vive aqui, isolado.
+
+FROM apache/airflow:3.2.2-python3.11
+
+USER root
+
+# O pip do Airflow precisa compilar nada, mas o pacote é instalado a partir do
+# código-fonte, então o diretório precisa existir com a posse correta.
+RUN mkdir -p /opt/triage && chown airflow:root /opt/triage
+
+# O banco de metadados vai para um diretório próprio, montado como volume nomeado, para
+# sobreviver à recriação do container. O modo g+w é o que permite ao volume ser escrito
+# quando o container roda com o uid do host e grupo 0 — um volume novo herda dono e
+# permissões do diretório correspondente na imagem.
+RUN mkdir -p /opt/airflow/db && chown airflow:root /opt/airflow/db && chmod 775 /opt/airflow/db
+
+USER airflow
+
+# Camada de dependências: só é reconstruída quando o pyproject muda, não a cada
+# alteração de código.
+COPY --chown=airflow:root pyproject.toml README.md /opt/triage/
+COPY --chown=airflow:root src /opt/triage/src
+
+# O constraint do Airflow não cobre as dependências do projeto, e forçar a resolução
+# conjunta quebraria a instalação da imagem oficial. Instalamos só o que a DAG usa,
+# deixando o Airflow com o ambiente que ele já validou.
+RUN pip install --no-cache-dir "/opt/triage[pipeline]"
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    AIRFLOW__CORE__LOAD_EXAMPLES=False \
+    AIRFLOW__CORE__DAGS_FOLDER=/opt/airflow/dags \
+    TRIAGE_DATA_DIR=/opt/airflow/data \
+    TRIAGE_MODELS_DIR=/opt/airflow/models

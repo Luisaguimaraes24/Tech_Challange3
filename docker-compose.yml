@@ -1,0 +1,93 @@
+# Stack local do projeto.
+#
+# Reproduz a topologia descrita em docs/deploy_architecture.md: a API serve inferência
+# de forma síncrona, o Airflow orquestra o ciclo de vida do modelo em lote, e os dois se
+# comunicam por um volume de artefatos — não por chamada direta. É a mesma fronteira que
+# em produção separa o serviço no ECS do bucket S3 onde a DAG publica.
+#
+# Prometheus e Grafana entram na Etapa 3.
+
+name: triage
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: triage-api:local
+    container_name: triage-api
+    ports:
+      - "8000:8000"
+    environment:
+      TRIAGE_MODELS_DIR: /app/models
+      TRIAGE_MODEL_BACKEND: ${TRIAGE_MODEL_BACKEND:-sklearn}
+      TRIAGE_LOG_LEVEL: ${TRIAGE_LOG_LEVEL:-INFO}
+    volumes:
+      # Somente leitura: quem publica modelo é a DAG, nunca o serviço de inferência.
+      - ./models:/app/models:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import sys, urllib.request
+          sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=2).status == 200 else 1)
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    restart: unless-stopped
+
+  airflow:
+    build:
+      context: .
+      dockerfile: Dockerfile.airflow
+    image: triage-airflow:local
+    container_name: triage-airflow
+    # A imagem oficial roda como uid 50000, mas `./data` e `./models` são bind mounts
+    # pertencentes ao usuário do host — o container não conseguiria escrever neles, e a
+    # DAG falharia na primeira tarefa que grava arquivo. Rodar com o uid do host e o
+    # grupo 0 resolve: a imagem do Airflow dá permissão de escrita ao grupo root em
+    # AIRFLOW_HOME justamente para suportar uid arbitrário.
+    # `make up` já exporta AIRFLOW_UID; para rodar `docker compose` na mão, use
+    # `AIRFLOW_UID=$(id -u) docker compose up -d`.
+    user: "${AIRFLOW_UID:-50000}:0"
+    # `standalone` sobe scheduler, API server e um usuário admin num processo só, com
+    # SQLite. É o suficiente para orquestrar um pipeline de treino e mantém a stack
+    # demonstrável sem Postgres, Redis e workers Celery.
+    command: standalone
+    ports:
+      - "8080:8080"
+    environment:
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      # Sem isso o banco fica em /opt/airflow/airflow.db, fora de qualquer volume, e
+      # todo o histórico de execuções some quando o container é recriado.
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: sqlite:////opt/airflow/db/airflow.db
+      # A stack existe para demonstrar o pipeline: uma DAG que nasce pausada faz o
+      # `docker compose up` parecer quebrado até alguém descobrir o botão.
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+      # Sem isso o standalone gera uma senha nova a cada `up`, e a demo trava na tela
+      # de login procurando o arquivo de senha dentro do container.
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_USERNAME:-admin}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD:-admin}
+      TRIAGE_DATA_DIR: /opt/airflow/data
+      TRIAGE_MODELS_DIR: /opt/airflow/models
+      TRIAGE_URGENT_RECALL_TARGET: ${TRIAGE_URGENT_RECALL_TARGET:-0.90}
+      TRIAGE_MIN_RECALL_URGENTE: ${TRIAGE_MIN_RECALL_URGENTE:-0.85}
+      TRIAGE_MIN_F1_MACRO: ${TRIAGE_MIN_F1_MACRO:-0.52}
+    volumes:
+      - ./dags:/opt/airflow/dags:ro
+      - ./data:/opt/airflow/data
+      # Leitura e escrita: este é o lado que publica os artefatos que a API consome.
+      - ./models:/opt/airflow/models
+      - airflow-logs:/opt/airflow/logs
+      # O banco de metadados precisa de volume próprio: sem ele, todo o histórico de
+      # execuções desaparece na primeira vez que o container é recriado.
+      - airflow-db:/opt/airflow/db
+    restart: unless-stopped
+
+volumes:
+  airflow-logs:
+  airflow-db:
