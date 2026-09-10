@@ -26,7 +26,10 @@ class Settings(BaseSettings):
         models_dir: Onde os artefatos de modelo são gravados e lidos.
         kaggle_dataset: Identificador do dataset no Kaggle.
         test_size: Fração do dataset reservada para teste.
-        min_f1_macro: Limiar de qualidade que a DAG de treino usa como gate.
+        urgent_recall_target: Recall de `urgente` que a calibração da trava persegue.
+        min_f1_macro: Piso de f1-macro no gate de qualidade da DAG de treino.
+        min_recall_urgente: Piso de recall na classe crítica, o gate que de fato decide
+            se um modelo pode ir para produção.
         model_backend: Motor de inferência da API (`sklearn` ou `onnx`).
         api_host: Interface de escuta da API.
         api_port: Porta de escuta da API.
@@ -45,7 +48,14 @@ class Settings(BaseSettings):
     kaggle_dataset: str = "saharalaa/medical-abstracts-tc-corpus"
 
     test_size: float = 0.2
-    min_f1_macro: float = 0.55
+
+    # Política de triagem: capturar 90% dos laudos urgentes, aceitando o custo em
+    # falsos alarmes. É uma decisão institucional, não um hiperparâmetro — por isso
+    # vive na configuração do serviço e não dentro do código de treino.
+    urgent_recall_target: float = 0.90
+
+    min_f1_macro: float = 0.52
+    min_recall_urgente: float = 0.85
 
     model_backend: str = "sklearn"
 
@@ -73,6 +83,15 @@ class Settings(BaseSettings):
     def onnx_model_path(self) -> Path:
         """Caminho do modelo exportado para ONNX."""
         return self.models_dir / "model.onnx"
+
+    @property
+    def decision_path(self) -> Path:
+        """Caminho da regra de decisão que acompanha o modelo.
+
+        A regra é parte do contrato do modelo, não configuração: um limiar calibrado
+        para um treino não vale para outro, então ele viaja junto do artefato.
+        """
+        return self.models_dir / "decision.json"
 
     @property
     def metrics_path(self) -> Path:

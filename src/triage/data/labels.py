@@ -24,6 +24,7 @@ from enum import StrEnum
 __all__ = [
     "CONDITION_NAMES",
     "CONDITION_TO_URGENCY",
+    "URGENCY_COLUMN_LABELS",
     "URGENCY_DESCRIPTIONS",
     "UrgencyLevel",
     "condition_name",
@@ -61,6 +62,11 @@ CONDITION_TO_URGENCY: dict[int, UrgencyLevel] = {
     5: UrgencyLevel.NORMAL,  # general pathological conditions
 }
 """Regra de negócio que converte condição médica em nível de urgência."""
+
+
+URGENCY_COLUMN_LABELS: list[str] = sorted(level.value for level in UrgencyLevel)
+"""Ordem canônica dos níveis em matrizes e relatórios, para que linhas e colunas
+signifiquem sempre a mesma coisa entre treino, avaliação e API."""
 
 
 URGENCY_DESCRIPTIONS: dict[UrgencyLevel, str] = {

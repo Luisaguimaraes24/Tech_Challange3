@@ -2,24 +2,31 @@
 
 import json
 
-import pandas as pd
 import pytest
 
 from triage.api.predictor import Predictor, SklearnBackend
-from triage.model.evaluate import evaluate_pipeline
+from triage.data.loader import CONDITION_COLUMN, TEXT_COLUMN, load_split
+from triage.model.decision import DecisionRule
+from triage.model.evaluate import evaluate_decision
 from triage.model.train import build_pipeline, train
+
+
+@pytest.fixture
+def treino_leve(monkeypatch):
+    """Afrouxa o TF-IDF: a fixture tem 20 linhas e min_df=3 zeraria o vocabulário."""
+    from triage.model import train as train_module
+
+    monkeypatch.setitem(train_module.VECTORIZER_PARAMS, "min_df", 1)
+    monkeypatch.setattr(train_module, "CALIBRATION_FOLDS", 2)
 
 
 @pytest.fixture(scope="module")
 def pipeline_treinado(fixtures_dir_module):
-    """Pipeline treinado na fixture pequena, suficiente para validar o contrato."""
-    from triage.data.loader import TEXT_COLUMN, URGENCY_COLUMN, load_split
-
+    """Pipeline treinado nas 5 condições, com a fixture pequena."""
     frame = load_split("train", raw_dir=fixtures_dir_module)
     pipeline = build_pipeline()
-    # A fixture tem 20 linhas; sem afrouxar min_df o vocabulário fica vazio.
     pipeline.set_params(tfidf__min_df=1, tfidf__max_df=1.0)
-    pipeline.fit(frame[TEXT_COLUMN], frame[URGENCY_COLUMN])
+    pipeline.fit(frame[TEXT_COLUMN], frame[CONDITION_COLUMN])
     return pipeline
 
 
@@ -34,76 +41,112 @@ def test_pipeline_e_reprodutivel():
     assert build_pipeline().named_steps["clf"].random_state == 42
 
 
-def test_evaluate_pipeline_devolve_relatorio_serializavel(pipeline_treinado, fixtures_dir_module):
-    from triage.data.loader import load_split
+def test_pipeline_treina_nas_cinco_condicoes(pipeline_treinado):
+    # É o ponto central da modelagem: o alvo do treino é a condição, não a urgência.
+    assert sorted(pipeline_treinado.classes_) == [1, 2, 3, 4, 5]
 
+
+def test_evaluate_devolve_relatorio_serializavel(pipeline_treinado, fixtures_dir_module):
     frame = load_split("test", raw_dir=fixtures_dir_module)
-    metrics = evaluate_pipeline(pipeline_treinado, frame)
+    rule = DecisionRule([int(c) for c in pipeline_treinado.classes_])
+
+    metrics = evaluate_decision(pipeline_treinado, rule, frame)
 
     assert 0.0 <= metrics["accuracy"] <= 1.0
     assert 0.0 <= metrics["f1_macro"] <= 1.0
+    assert 0.0 <= metrics["recall_urgente"] <= 1.0
     assert set(metrics["per_class"]) == set(metrics["labels"])
-    assert len(metrics["confusion_matrix"]) == len(metrics["labels"])
     assert metrics["n_test"] == len(frame)
     json.dumps(metrics)  # precisa ser serializável para o metrics.json
 
 
-def test_matriz_de_confusao_soma_o_total_de_amostras(pipeline_treinado, fixtures_dir_module):
-    from triage.data.loader import load_split
-
+def test_recall_urgente_e_promovido_a_metrica_de_primeiro_nivel(
+    pipeline_treinado, fixtures_dir_module
+):
     frame = load_split("test", raw_dir=fixtures_dir_module)
-    metrics = evaluate_pipeline(pipeline_treinado, frame)
+    rule = DecisionRule([int(c) for c in pipeline_treinado.classes_])
 
-    total = sum(sum(row) for row in metrics["confusion_matrix"])
-    assert total == metrics["n_test"]
+    metrics = evaluate_decision(pipeline_treinado, rule, frame)
+
+    assert metrics["recall_urgente"] == metrics["per_class"]["urgente"]["recall"]
+    assert metrics["precision_urgente"] == metrics["per_class"]["urgente"]["precision"]
 
 
-def test_evaluate_pipeline_com_classificador_perfeito(pipeline_treinado):
-    frame = pd.DataFrame(
-        {
-            "medical_abstract": ["texto de laudo para triagem"] * 3,
-            "urgency": ["normal"] * 3,
-        }
+def test_matriz_de_confusao_soma_o_total_de_amostras(pipeline_treinado, fixtures_dir_module):
+    frame = load_split("test", raw_dir=fixtures_dir_module)
+    rule = DecisionRule([int(c) for c in pipeline_treinado.classes_])
+
+    metrics = evaluate_decision(pipeline_treinado, rule, frame)
+
+    assert sum(sum(linha) for linha in metrics["confusion_matrix"]) == metrics["n_test"]
+
+
+def test_trava_de_urgencia_aumenta_o_recall_da_classe_critica(
+    pipeline_treinado, fixtures_dir_module
+):
+    frame = load_split("test", raw_dir=fixtures_dir_module)
+    classes = [int(c) for c in pipeline_treinado.classes_]
+
+    sem_trava = evaluate_decision(pipeline_treinado, DecisionRule(classes), frame)
+    com_trava = evaluate_decision(
+        pipeline_treinado, DecisionRule(classes, urgent_threshold=0.2), frame
     )
-    metrics = evaluate_pipeline(pipeline_treinado, frame)
 
-    assert metrics["n_test"] == 3
+    assert com_trava["recall_urgente"] >= sem_trava["recall_urgente"]
+    assert com_trava["decisoes_por_trava_de_urgencia"] >= 0
 
 
-def test_train_persiste_modelo_e_metricas(fixtures_dir, tmp_path, monkeypatch):
-    # Sem afrouxar min_df, 20 linhas não formam vocabulário.
-    monkeypatch.setitem(
-        __import__("triage.model.train", fromlist=["VECTORIZER_PARAMS"]).VECTORIZER_PARAMS,
-        "min_df",
-        1,
-    )
+def test_train_persiste_modelo_regra_e_metricas(fixtures_dir, tmp_path, treino_leve):
     model_path = tmp_path / "model.pkl"
     metrics_path = tmp_path / "metrics.json"
+    decision_path = tmp_path / "decision.json"
 
-    metrics = train(raw_dir=fixtures_dir, model_path=model_path, metrics_path=metrics_path)
+    metrics = train(
+        raw_dir=fixtures_dir,
+        model_path=model_path,
+        metrics_path=metrics_path,
+        decision_path=decision_path,
+        recall_target=0.8,
+    )
 
     assert model_path.exists()
-    assert metrics_path.exists()
+    assert decision_path.exists()
     assert json.loads(metrics_path.read_text(encoding="utf-8"))["f1_macro"] == metrics["f1_macro"]
     assert metrics["n_train"] == 20
     assert metrics["vocabulary_size"] > 0
-    assert metrics["fit_seconds"] > 0
+    assert metrics["decision_rule"]["recall_target"] == 0.8
+    assert metrics["threshold_calibration"]["curve"]
 
 
-def test_backend_sklearn_carrega_artefato_treinado(fixtures_dir, tmp_path, monkeypatch):
-    monkeypatch.setitem(
-        __import__("triage.model.train", fromlist=["VECTORIZER_PARAMS"]).VECTORIZER_PARAMS,
-        "min_df",
-        1,
+def test_train_grava_a_regra_no_formato_que_o_predictor_le(fixtures_dir, tmp_path, treino_leve):
+    decision_path = tmp_path / "decision.json"
+    train(
+        raw_dir=fixtures_dir,
+        model_path=tmp_path / "model.pkl",
+        metrics_path=tmp_path / "metrics.json",
+        decision_path=decision_path,
     )
+
+    rule = DecisionRule.from_dict(json.loads(decision_path.read_text(encoding="utf-8")))
+
+    assert rule.condition_classes == [1, 2, 3, 4, 5]
+
+
+def test_backend_sklearn_devolve_probabilidades_de_condicao(fixtures_dir, tmp_path, treino_leve):
     model_path = tmp_path / "model.pkl"
-    train(raw_dir=fixtures_dir, model_path=model_path, metrics_path=tmp_path / "metrics.json")
+    train(
+        raw_dir=fixtures_dir,
+        model_path=model_path,
+        metrics_path=tmp_path / "metrics.json",
+        decision_path=tmp_path / "decision.json",
+    )
 
     backend = SklearnBackend(model_path)
-    probabilidades = backend.predict_proba("acute myocardial infarction with elevated troponin")
+    proba = backend.predict_proba("acute myocardial infarction with elevated troponin")
 
-    assert set(probabilidades) == set(backend.classes)
-    assert sum(probabilidades.values()) == pytest.approx(1.0, abs=1e-6)
+    assert backend.condition_classes == [1, 2, 3, 4, 5]
+    assert proba.shape == (1, 5)
+    assert proba.sum() == pytest.approx(1.0, abs=1e-6)
 
 
 def test_backend_sklearn_erro_claro_quando_artefato_ausente(tmp_path):
@@ -116,19 +159,21 @@ def test_predictor_rejeita_backend_desconhecido():
         Predictor.load(backend_name="tensorrt")
 
 
-def test_predictor_escolhe_a_classe_mais_provavel(fixtures_dir, tmp_path, monkeypatch):
-    monkeypatch.setitem(
-        __import__("triage.model.train", fromlist=["VECTORIZER_PARAMS"]).VECTORIZER_PARAMS,
-        "min_df",
-        1,
-    )
+def test_predictor_devolve_urgencia_coerente_com_a_distribuicao(
+    fixtures_dir, tmp_path, treino_leve
+):
     model_path = tmp_path / "model.pkl"
-    train(raw_dir=fixtures_dir, model_path=model_path, metrics_path=tmp_path / "metrics.json")
+    train(
+        raw_dir=fixtures_dir,
+        model_path=model_path,
+        metrics_path=tmp_path / "metrics.json",
+        decision_path=tmp_path / "decision.json",
+    )
 
     resultado = Predictor(backend=SklearnBackend(model_path)).predict("chest pain and dyspnea")
 
-    assert resultado["urgencia"] == max(
-        resultado["probabilidades"], key=resultado["probabilidades"].__getitem__
-    )
+    assert resultado["urgencia"] in {"atencao", "normal", "urgente"}
+    assert resultado["confianca"] == resultado["probabilidades"][resultado["urgencia"]]
+    assert sum(resultado["probabilidades"].values()) == pytest.approx(1.0, abs=1e-3)
+    assert resultado["regra"] in {"condicao_dominante", "trava_de_urgencia"}
     assert resultado["backend"] == "sklearn"
-    assert resultado["descricao"]
