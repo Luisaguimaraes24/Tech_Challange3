@@ -20,7 +20,6 @@ notebooks
 htmlcov
 
 PLANO.md
-README.md
 Makefile
 docker-compose.yml
 .dockerignore
