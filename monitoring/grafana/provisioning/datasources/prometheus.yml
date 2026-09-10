@@ -1,0 +1,20 @@
+# Fonte de dados provisionada por arquivo.
+#
+# Configurar pela interface criaria um estado que existe apenas no volume do Grafana:
+# quem clonasse o repositório subiria a stack e encontraria painéis vazios, sem nenhuma
+# pista do motivo.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      # Precisa acompanhar o scrape_interval do prometheus.yml: com um valor maior, o
+      # Grafana agrupa amostras e achata os picos que o painel existe para mostrar.
+      timeInterval: 5s

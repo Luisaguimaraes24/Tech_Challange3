@@ -5,8 +5,6 @@
 # comunicam por um volume de artefatos — não por chamada direta. É a mesma fronteira que
 # em produção separa o serviço no ECS do bucket S3 onde a DAG publica.
 #
-# Prometheus e Grafana entram na Etapa 3.
-
 name: triage
 
 services:
@@ -88,6 +86,51 @@ services:
       - airflow-db:/opt/airflow/db
     restart: unless-stopped
 
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    container_name: triage-prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # 24h basta para a stack local e mantém o volume pequeno; em produção a
+      # retenção seria responsabilidade do serviço gerenciado.
+      - --storage.tsdb.retention.time=24h
+      - --web.enable-lifecycle
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.3.1
+    container_name: triage-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USERNAME:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      # A stack é local e efêmera; a tela de troca de senha só atrasaria a demo.
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      # Abre direto no painel da triagem em vez da home vazia do Grafana.
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/provisioning/dashboards/triage.json
+    volumes:
+      # Fonte de dados e painel são provisionados por arquivo, versionados no git.
+      # Configurar pela interface deixaria o estado só no volume do Grafana.
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
 volumes:
   airflow-logs:
   airflow-db:
+  prometheus-data:
+  grafana-data:

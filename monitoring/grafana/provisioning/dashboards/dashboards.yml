@@ -1,0 +1,19 @@
+# Provedor de dashboards.
+#
+# O JSON do painel é versionado no repositório e carregado no boot. `allowUiUpdates`
+# fica desligado: um painel editado pela interface divergiria silenciosamente do arquivo,
+# e a versão que vale é a que está no git.
+
+apiVersion: 1
+
+providers:
+  - name: triage
+    orgId: 1
+    folder: Triagem
+    type: file
+    disableDeletion: false
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /etc/grafana/provisioning/dashboards
+      foldersFromFilesStructure: false

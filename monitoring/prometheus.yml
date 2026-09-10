@@ -1,0 +1,27 @@
+# Configuração do Prometheus para a stack local.
+#
+# O intervalo de scrape é de 5s, bem mais curto que os 15s do padrão. A razão é a
+# demonstração: com 15s, um teste de carga de um minuto rende quatro pontos por série e
+# os gráficos ficam ilegíveis. Em produção o intervalo seria maior — 5s multiplica o
+# volume de amostras por três sem ganho operacional.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 15s
+  external_labels:
+    ambiente: local
+    projeto: triage
+
+scrape_configs:
+  - job_name: triage-api
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["api:8000"]
+        labels:
+          servico: triagem
+
+  # O Prometheus se observa para que uma falha de coleta seja visível como dado, e não
+  # apenas como um gráfico que parou de crescer.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
