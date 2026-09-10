@@ -8,6 +8,12 @@ export UV_PYTHON_INSTALL_DIR := $(HOME)/.local/share/uv/python
 UV := $(HOME)/.local/bin/uv
 PY := .venv/bin/python
 
+# Precisam acompanhar Dockerfile.airflow e .github/workflows/ci.yml.
+# tests/test_versions.py falha se as referências divergirem — foi assim que um CI
+# fixado numa versão antiga do Airflow quebrou enquanto tudo passava localmente.
+PYTHON_VERSION := 3.11
+AIRFLOW_VERSION := 3.2.2
+
 .PHONY: help setup data lint format test train up down clean
 
 help:  ## Lista os alvos disponíveis
@@ -53,8 +59,8 @@ dag:  ## Dispara a DAG de treino e acompanha o resultado
 	docker compose exec airflow airflow dags trigger triage_training
 
 validate-dag:  ## Verifica que a DAG carrega, sem subir o Airflow
-	$(UV) run --isolated --no-project --with "apache-airflow==3.2.2" --python 3.11 \
-		python scripts/validate_dag.py
+	$(UV) run --isolated --no-project --with "apache-airflow==$(AIRFLOW_VERSION)" \
+		--python $(PYTHON_VERSION) python scripts/validate_dag.py
 
 clean:  ## Remove caches e artefatos temporários
 	rm -rf .pytest_cache .ruff_cache .coverage htmlcov
