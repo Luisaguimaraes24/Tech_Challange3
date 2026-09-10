@@ -14,10 +14,11 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from triage import __version__
+from triage.api import metrics
 from triage.api.predictor import Predictor
 from triage.api.schemas import (
     ErrorResponse,
@@ -53,9 +54,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.predictor.classes,
             app.state.predictor.rule.urgent_threshold,
         )
+        metrics.set_model_state(True, app.state.predictor.rule.urgent_threshold)
     except (FileNotFoundError, ValueError) as exc:
         app.state.predictor = None
         logger.error("Serviço no ar em modo degradado, sem modelo: %s", exc)
+        metrics.set_model_state(False)
 
     yield
 
@@ -72,6 +75,21 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+
+metrics.install(app)
+
+
+@app.get("/metrics", include_in_schema=False)
+async def prometheus_metrics() -> Response:
+    """Expõe as métricas no formato de exposição do Prometheus.
+
+    Fora do schema OpenAPI de propósito: é um endpoint de infraestrutura, consumido
+    pelo scrape, não parte do contrato da triagem.
+
+    Returns:
+        As métricas serializadas.
+    """
+    return metrics.metrics_response()
 
 
 def get_predictor(request: Request) -> Predictor:
@@ -163,13 +181,23 @@ async def predict(payload: PredictionRequest, request: Request) -> PredictionRes
     """
     predictor = get_predictor(request)
     try:
-        return PredictionResponse(**predictor.predict(payload.texto))
+        resultado = predictor.predict(payload.texto)
     except Exception as exc:  # pragma: no cover - salvaguarda de runtime
+        # A exceção é registrada sem o texto do laudo: `logger.exception` já traz o
+        # traceback, e o conteúdo clínico não pode vazar para o log.
         logger.exception("Falha na inferência")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Falha ao classificar o laudo.",
         ) from exc
+
+    metrics.observe_prediction(
+        urgencia=str(resultado["urgencia"]),
+        regra=resultado["regra"],
+        backend=resultado["backend"],
+        inference_seconds=resultado["latencia_ms"] / 1_000,
+    )
+    return PredictionResponse(**resultado)
 
 
 @app.exception_handler(HTTPException)
