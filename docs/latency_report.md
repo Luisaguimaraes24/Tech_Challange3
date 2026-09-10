@@ -66,6 +66,50 @@ inferência — sem cauda longa, comportamento esperado de uma multiplicação e
 vocabulário fixo. Já no HTTP o p99 chega a 2,2× do p50: a cauda vem da camada de serviço,
 não do modelo, o que reforça onde o esforço de otimização de fato compensaria.
 
+---
+
+## Medição sob concorrência (Etapa 3)
+
+A linha de base acima foi medida com **um cliente por vez**. Isso responde "quanto custa
+uma requisição", mas não "quanto o serviço demora quando está sendo usado". Com o gerador
+de carga (`scripts/load_test.py`), 30 segundos por nível, laudos reais em rodízio:
+
+| Clientes simultâneos | p50 | p95 | p99 |
+|---|---|---|---|
+| 1 | 6,57 ms | 17,09 ms | 105,16 ms |
+| 4 | 18,92 ms | 29,95 ms | 38,53 ms |
+| 8 | 24,20 ms | 40,99 ms | 51,84 ms |
+| 16 | 53,58 ms | 74,08 ms | 99,45 ms |
+
+**Esta tabela corrige a conclusão da Etapa 1.** Lá, o alvo de p95 < 100 ms aparecia
+cumprido com 27× de folga. Com 16 clientes simultâneos, o p95 vai a 74 ms e o p99 encosta
+em 99 ms — a folga real é de 1,35×, não de 27×. O número tranquilizador vinha da condição
+de medição, não do sistema.
+
+A causa é estrutural: um worker uvicorn, um processo Python, um GIL. As requisições não
+ficam mais lentas — elas ficam **na fila**. Escalar aqui é horizontal (mais tarefas no
+ECS, como prevê o documento de arquitetura), não otimizar o modelo.
+
+### O que a observabilidade custou
+
+Instrumentar não é de graça, e o custo foi medido em vez de estimado. Três execuções de
+1.000 requisições em cada condição, valor mediano:
+
+| Condição | p50 | p95 |
+|---|---|---|
+| Etapa 1 — sem instrumentação, só a API no ar | 2,07 ms | 3,66 ms |
+| Com instrumentação, só a API no ar | 3,38 ms | 6,05 ms |
+| Com instrumentação e a stack completa | 5,30 ms | 8,94 ms |
+
+O middleware do Prometheus acrescenta cerca de **1,3 ms** ao p50; a disputa de CPU com
+Prometheus, Grafana e Airflow no mesmo host acrescenta outros ~1,9 ms. As duas parcelas
+são da mesma ordem da variância entre execuções documentada acima, então valem como
+ordem de grandeza — não como número exato. Registrar isso importa: é comum tratar
+observabilidade como custo zero, e aqui ela consome mais tempo do que a otimização da
+Etapa 4 tem chance de recuperar.
+
+---
+
 ## O que isso implica para a Etapa 4
 
 A otimização para ONNX foi mantida no plano — é requisito do projeto e vale 20% da nota —

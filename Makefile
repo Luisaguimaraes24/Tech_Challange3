@@ -58,6 +58,9 @@ dag:  ## Dispara a DAG de treino e acompanha o resultado
 	docker compose exec airflow airflow dags unpause triage_training
 	docker compose exec airflow airflow dags trigger triage_training
 
+load:  ## Gera carga na API para popular o dashboard (60s, 8 clientes)
+	$(PY) scripts/load_test.py --duration 60 --concurrency 8 --output docs/load_test.json
+
 validate-dag:  ## Verifica que a DAG carrega, sem subir o Airflow
 	$(UV) run --isolated --no-project --with "apache-airflow==$(AIRFLOW_VERSION)" \
 		--python $(PYTHON_VERSION) python scripts/validate_dag.py
