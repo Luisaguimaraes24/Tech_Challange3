@@ -48,9 +48,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         app.state.predictor = Predictor.load()
         logger.info(
-            "Modelo pronto | backend=%s | classes=%s",
+            "Modelo pronto | backend=%s | classes=%s | trava de urgência=%s",
             app.state.predictor.backend.name,
-            app.state.predictor.backend.classes,
+            app.state.predictor.classes,
+            app.state.predictor.rule.urgent_threshold,
         )
     except (FileNotFoundError, ValueError) as exc:
         app.state.predictor = None
@@ -131,8 +132,9 @@ async def model_info(request: Request) -> ModelInfoResponse:
     predictor = get_predictor(request)
     return ModelInfoResponse(
         backend=predictor.backend.name,
-        classes=predictor.backend.classes,
+        classes=predictor.classes,
         model_path=str(getattr(predictor.backend, "model_path", "")),
+        decision_rule=predictor.rule.to_dict(),
         metrics=predictor.metrics,
     )
 

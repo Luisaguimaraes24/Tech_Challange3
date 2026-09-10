@@ -5,12 +5,14 @@ HTTP e a fronteira de validação, não a qualidade do classificador — essa é
 pelas métricas de avaliação.
 """
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
 from triage.api.main import app
 from triage.api.predictor import InferenceBackend, Predictor
 from triage.api.schemas import MIN_TEXT_LENGTH
+from triage.model.decision import DecisionRule
 
 LAUDO_VALIDO = (
     "Patient presents with acute chest pain radiating to the left arm, "
@@ -19,26 +21,35 @@ LAUDO_VALIDO = (
 
 
 class FakeBackend(InferenceBackend):
-    """Backend determinístico, sem dependência de artefato em disco."""
+    """Backend determinístico, sem dependência de artefato em disco.
+
+    Devolve 70% em neoplasia (condição 1), que projeta para `urgente`.
+    """
 
     name = "fake"
 
     @property
-    def classes(self):
-        return ["atencao", "normal", "urgente"]
+    def condition_classes(self):
+        return [1, 2, 3, 4, 5]
 
-    def predict_proba(self, text: str) -> dict[str, float]:
-        return {"atencao": 0.15, "normal": 0.10, "urgente": 0.75}
+    def predict_proba(self, text: str) -> np.ndarray:
+        return np.array([[0.70, 0.05, 0.10, 0.05, 0.10]])
+
+
+def _preditor() -> Predictor:
+    return Predictor(
+        backend=FakeBackend(),
+        rule=DecisionRule([1, 2, 3, 4, 5], urgent_threshold=0.5, recall_target=0.9),
+        metrics={"f1_macro": 0.9, "recall_urgente": 0.9},
+    )
 
 
 @pytest.fixture
 def client():
     """Cliente com um preditor falso já carregado."""
-    app.state.predictor = Predictor(backend=FakeBackend(), metrics={"f1_macro": 0.9})
+    app.state.predictor = _preditor()
     with TestClient(app) as test_client:
-        test_client.app.state.predictor = Predictor(
-            backend=FakeBackend(), metrics={"f1_macro": 0.9}
-        )
+        test_client.app.state.predictor = _preditor()
         yield test_client
 
 
@@ -74,9 +85,17 @@ def test_predict_classifica_laudo(client):
     assert response.status_code == 200
     body = response.json()
     assert body["urgencia"] == "urgente"
+    # 0.70 (neoplasia) + 0.05 (cardiovascular) projetam para 0.75 de urgência.
     assert body["confianca"] == pytest.approx(0.75)
     assert body["descricao"]
     assert body["backend"] == "fake"
+
+
+def test_predict_informa_qual_regra_decidiu(client):
+    body = client.post("/predict", json={"texto": LAUDO_VALIDO}).json()
+
+    # A condição dominante já é urgente, então a trava não precisou entrar.
+    assert body["regra"] == "condicao_dominante"
 
 
 def test_predict_devolve_distribuicao_completa(client):
@@ -136,6 +155,9 @@ def test_model_info_expoe_metadados(client):
     assert body["backend"] == "fake"
     assert body["classes"] == ["atencao", "normal", "urgente"]
     assert body["metrics"]["f1_macro"] == 0.9
+    # A regra em vigor precisa ser auditável pelo hospital, não só pelo código.
+    assert body["decision_rule"]["urgent_threshold"] == 0.5
+    assert body["decision_rule"]["recall_target"] == 0.9
 
 
 def test_model_info_sem_modelo_responde_503(client_sem_modelo):

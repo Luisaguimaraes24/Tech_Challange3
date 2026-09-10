@@ -62,6 +62,13 @@ class PredictionResponse(BaseModel):
     probabilidades: dict[str, float] = Field(
         description="Distribuição de probabilidade sobre todos os níveis."
     )
+    regra: str = Field(
+        description=(
+            "Qual parte da regra determinou a decisão: `condicao_dominante` quando a "
+            "condição mais provável define o nível, ou `trava_de_urgencia` quando a "
+            "probabilidade acumulada de urgência ultrapassou o limiar de segurança."
+        )
+    )
     latencia_ms: float = Field(ge=0.0, description="Tempo de inferência do modelo, em ms.")
     backend: str = Field(description="Motor de inferência usado (`sklearn` ou `onnx`).")
 
@@ -81,6 +88,9 @@ class ModelInfoResponse(BaseModel):
     backend: str = Field(description="Motor de inferência ativo.")
     classes: list[str] = Field(description="Níveis de urgência que o modelo pode devolver.")
     model_path: str = Field(description="Caminho do artefato carregado.")
+    decision_rule: dict = Field(
+        description="Regra de decisão em vigor, incluindo o limiar da trava de urgência."
+    )
     metrics: dict | None = Field(
         default=None, description="Métricas da última avaliação, se disponíveis."
     )
