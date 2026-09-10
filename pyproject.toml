@@ -13,16 +13,16 @@ dependencies = [
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "scikit-learn>=1.5",
-    "pandas>=2.2",
     "numpy>=1.26",
     "joblib>=1.4",
     "prometheus-client>=0.21",
     "onnxruntime>=1.20",
-    "skl2onnx>=1.17",
 ]
 
 [project.optional-dependencies]
-data = ["kagglehub>=0.3"]
+# Dependências de ingestão e exportação de modelo: usadas pelo treino e pela DAG do
+# Airflow, mas não pela imagem de inferência, que carrega apenas o artefato pronto.
+pipeline = ["kagglehub>=0.3", "skl2onnx>=1.17", "pandas>=2.2"]
 
 [dependency-groups]
 dev = [
@@ -63,7 +63,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["D103", "D100"]
+"tests/*" = ["D100", "D102", "D103"]
 "dags/*" = ["D100"]
 
 [tool.ruff.lint.pydocstyle]
