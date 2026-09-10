@@ -1,0 +1,46 @@
+# Ambiente
+.env
+!.env.example
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.python-version
+
+# Dados (não versionados — baixados via kagglehub ou manualmente)
+data/raw/*
+data/processed/*
+!data/raw/.gitkeep
+!data/processed/.gitkeep
+
+# Artefatos de modelo
+models/*
+!models/.gitkeep
+
+# Caches de ferramentas
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Airflow (gerado em runtime dentro do container)
+airflow.db
+airflow-webserver.pid
+logs/
+standalone_admin_password.txt
+
+# Grafana/Prometheus (volumes locais)
+monitoring/grafana/data/
+monitoring/prometheus/data/
+
+# Documentos internos de planejamento (não fazem parte da entrega)
+PLANO.md
+documentos_trabalho/
+
+# Editor / SO
+.vscode/
+.idea/
+.DS_Store
+*.swp
