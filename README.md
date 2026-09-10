@@ -12,7 +12,7 @@ Sistema de triagem que classifica a urgência de laudos médicos em `normal`, `a
 |---|---|---|
 | 0 | Setup do ambiente e estrutura do repositório | ✅ concluída |
 | 1 | Decisão arquitetural e API FastAPI em Docker | ✅ concluída |
-| 2 | CI/CD (GitHub Actions) e DAG Airflow | ⬜ |
+| 2 | CI/CD (GitHub Actions) e DAG Airflow | ✅ concluída |
 | 3 | Monitoramento (Prometheus + Grafana) | ⬜ |
 | 4 | Otimização de latência (ONNX) e entrega | ⬜ |
 
@@ -171,6 +171,73 @@ Se o artefato de modelo não estiver presente, o serviço **sobe mesmo assim**: 
 reporta `model_loaded: false` e `/predict` responde 503. Um container que morre no boot
 some do orquestrador antes de conseguir explicar o motivo; um container vivo e degradado
 aparece no healthcheck e no dashboard.
+
+## Stack local
+
+```bash
+make up          # sobe API + Airflow
+make dag         # dispara a DAG de treino
+make down        # derruba tudo
+```
+
+| Serviço | Endereço | Credenciais |
+|---|---|---|
+| API | http://localhost:8000/docs | — |
+| Airflow | http://localhost:8080 | `admin` / `admin` |
+
+A API monta `./models` **somente leitura** e o Airflow monta o mesmo diretório com
+escrita. Quem publica modelo é a DAG, nunca o serviço de inferência — é a mesma fronteira
+que em produção separa o container no ECS do bucket S3.
+
+> Rodando `docker compose` direto, sem o Makefile, use
+> `AIRFLOW_UID=$(id -u) docker compose up -d`. A imagem oficial do Airflow roda como uid
+> 50000 e não conseguiria escrever nos diretórios montados do host.
+
+## Pipeline de treino (Airflow)
+
+```
+ingest_data → prepare_dataset → train_model → validate_model → publish_model
+```
+
+O ponto central do desenho é que **treinar e publicar são coisas separadas**. O treino
+escreve em `models/staging/`, que ninguém serve; entre ele e a publicação há um portão de
+qualidade que reprova o modelo se o recall de `urgente` cair abaixo de 0,85 ou o f1-macro
+abaixo de 0,52. Só o `publish_model` promove os artefatos para `models/`.
+
+Sem essa separação, um retreino ruim substituiria o modelo em produção antes de qualquer
+validação — que é como pipelines de retreino automático degradam um serviço aos poucos,
+sem ninguém perceber.
+
+Modelo, regra de decisão e métricas são promovidos **juntos**: um limiar calibrado para um
+modelo não vale para outro, e publicar só um dos dois deixaria a triagem operando num
+ponto que nunca foi medido.
+
+Verificado na prática: com o piso de recall elevado a 0,99, a DAG falha em
+`validate_model` com `recall de urgente 0.8986 < 0.9900`, a tarefa `publish_model` nem
+chega a executar, e o diretório servido permanece intocado.
+
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) roda em todo push e pull request:
+
+| Job | O que faz |
+|---|---|
+| `lint` | `ruff check` + `ruff format --check` |
+| `test` | `pytest` com cobertura, sobre a fixture versionada |
+| `build` | Constrói a imagem, sobe o container e **verifica que `/health` responde** |
+| `dag` | Carrega a DAG num ambiente Airflow isolado e confere a topologia |
+
+O job `build` não se contenta em construir: uma imagem que compila mas não sobe não vale
+nada. Ele roda o container sem artefato de modelo, que é justamente o caso em que a API
+deve subir em modo degradado em vez de morrer.
+
+O Airflow é instalado isolado no job `dag` (`uv run --isolated`), fora do ambiente do
+projeto — ele arrastaria dezenas de pacotes para o venv e conflitaria com as versões de
+scikit-learn e pandas usadas no treino.
+
+```bash
+make validate-dag   # a mesma verificação, localmente
+```
 
 ## Latência
 
