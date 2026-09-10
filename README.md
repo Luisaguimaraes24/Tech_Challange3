@@ -13,7 +13,7 @@ Sistema de triagem que classifica a urgência de laudos médicos em `normal`, `a
 | 0 | Setup do ambiente e estrutura do repositório | ✅ concluída |
 | 1 | Decisão arquitetural e API FastAPI em Docker | ✅ concluída |
 | 2 | CI/CD (GitHub Actions) e DAG Airflow | ✅ concluída |
-| 3 | Monitoramento (Prometheus + Grafana) | ⬜ |
+| 3 | Monitoramento (Prometheus + Grafana) | ✅ concluída |
 | 4 | Otimização de latência (ONNX) e entrega | ⬜ |
 
 ---
@@ -184,6 +184,8 @@ make down        # derruba tudo
 |---|---|---|
 | API | http://localhost:8000/docs | — |
 | Airflow | http://localhost:8080 | `admin` / `admin` |
+| Prometheus | http://localhost:9090 | — |
+| Grafana | http://localhost:3000 | `admin` / `admin` |
 
 A API monta `./models` **somente leitura** e o Airflow monta o mesmo diretório com
 escrita. Quem publica modelo é a DAG, nunca o serviço de inferência — é a mesma fronteira
@@ -239,6 +241,62 @@ scikit-learn e pandas usadas no treino.
 make validate-dag   # a mesma verificação, localmente
 ```
 
+## Observabilidade
+
+A API expõe `/metrics` no formato do Prometheus, instrumentada por um middleware único —
+instrumentar rota por rota deixaria buracos exatamente onde eles doem: numa rota nova que
+alguém esqueceu de decorar, ou num erro levantado antes do corpo da rota.
+
+| Métrica | Responde a |
+|---|---|
+| `triage_requests_total{method,endpoint,status}` | O serviço está sendo usado, e com que resultado? |
+| `triage_request_duration_seconds{endpoint}` | Está rápido o suficiente? |
+| `triage_inference_duration_seconds{backend}` | O tempo é do modelo ou do serviço? |
+| `triage_predictions_total{urgencia,regra}` | A distribuição de urgências mudou? |
+| `triage_errors_total{tipo}` | O que está falhando? |
+| `triage_model_loaded`, `triage_urgent_threshold` | Qual modelo está em produção, e em que ponto de operação? |
+
+> 🔒 **Nenhum rótulo carrega conteúdo de laudo.** Laudo médico é dado pessoal sensível sob
+> a LGPD, e métrica é retida por muito tempo, replicada e exposta a quem acessa o painel.
+> Todos os rótulos têm domínio fechado e pequeno — o que também protege o Prometheus de
+> morrer por cardinalidade. O rótulo de rota usa o **template** (`/predict`), nunca o
+> caminho concreto, para que varredura automatizada de URLs não crie séries novas. Há
+> teste cobrindo os dois pontos.
+
+### Dashboard
+
+O painel é **provisionado por arquivo** ([`monitoring/grafana/provisioning/`](monitoring/grafana/provisioning/)),
+não configurado pela interface: configuração clicada existiria só no volume do Grafana, e
+quem clonasse o repositório subiria a stack e encontraria painéis vazios sem nenhuma
+pista do motivo. `allowUiUpdates` fica desligado — a versão que vale é a do git.
+
+Oito painéis (o projeto exige três):
+
+| Painel | Forma | Leitura |
+|---|---|---|
+| Taxa de erro | número, com limiares de status | Fração fora de 2xx nos últimos 5 min |
+| Latência p95 | número, com limiares | Contra o alvo de 100 ms |
+| Modelo em produção | estado | `DEGRADADO` quando a API subiu sem artefato |
+| Trava de urgência | número | Ponto de operação em vigor |
+| Requisições por segundo | série temporal, por rota | Separa carga de triagem de tráfego de infra |
+| Latência de resposta | série temporal, p50/p95/p99 | A distância entre p50 e p99 é a cauda |
+| Urgências por minuto | série temporal, por nível | Sinal de deriva mais barato que existe aqui |
+| Inferência por backend | série temporal, p95 | Quanto do tempo é modelo e quanto é serviço |
+
+As cores não são decorativas: urgência é **estado**, então usa a paleta de status
+(verde/âmbar/vermelho, na ordem da severidade); séries que são **identidade** usam a
+paleta categórica em ordem fixa, validada para daltonismo. Nenhum painel usa dois eixos y.
+
+### Gerando carga
+
+```bash
+python scripts/load_test.py --duration 60 --concurrency 8
+```
+
+Um dashboard sem tráfego mostra linhas retas em zero. O gerador usa laudos reais do split
+de teste e envia 5% de requisições inválidas de propósito — um painel de erro que nunca
+sai de zero não prova nada.
+
 ## Latência
 
 ```bash
@@ -252,9 +310,20 @@ Linha de base medida na Etapa 1, com 1.000 requisições sobre laudos reais do s
 | Modelo (em processo) | 0,895 ms | 1,073 ms | 1,208 ms | 1.103 req/s |
 | HTTP (container Docker) | 2,071 ms | 3,656 ms | 4,478 ms | 434 req/s |
 
-O alvo de p95 < 100 ms já é cumprido com folga de 27× **antes** de qualquer otimização —
-e mais da metade do tempo de resposta não é o modelo, e sim serialização, validação e rede.
-Detalhes, variância entre execuções e implicações para a Etapa 4 em
+Só que **essa medição usa um cliente por vez**, e isso muda tudo. Sob concorrência:
+
+| Clientes simultâneos | p50 | p95 | p99 |
+|---|---|---|---|
+| 1 | 6,57 ms | 17,09 ms | 105,16 ms |
+| 4 | 18,92 ms | 29,95 ms | 38,53 ms |
+| 8 | 24,20 ms | 40,99 ms | 51,84 ms |
+| 16 | 53,58 ms | 74,08 ms | 99,45 ms |
+
+Com 16 clientes simultâneos a folga contra o alvo de 100 ms cai de 27× para **1,35×**. As
+requisições não ficam mais lentas — ficam na fila, atrás de um worker uvicorn e um GIL.
+Escalar aqui é horizontal, não otimizar o modelo.
+
+Metodologia, o custo medido da própria instrumentação e as implicações para a Etapa 4 em
 [docs/latency_report.md](docs/latency_report.md).
 
 ## Licença
