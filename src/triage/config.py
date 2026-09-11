@@ -30,7 +30,7 @@ class Settings(BaseSettings):
         min_f1_macro: Piso de f1-macro no gate de qualidade da DAG de treino.
         min_recall_urgente: Piso de recall na classe crítica, o gate que de fato decide
             se um modelo pode ir para produção.
-        model_backend: Motor de inferência da API (`sklearn` ou `onnx`).
+        model_backend: Motor de inferência da API (`sklearn`, `onnx` ou `onnx-int8`).
         api_host: Interface de escuta da API.
         api_port: Porta de escuta da API.
         log_level: Nível de log da aplicação.
@@ -81,8 +81,13 @@ class Settings(BaseSettings):
 
     @property
     def onnx_model_path(self) -> Path:
-        """Caminho do modelo exportado para ONNX."""
+        """Caminho do classificador exportado para ONNX."""
         return self.models_dir / "model.onnx"
+
+    @property
+    def onnx_quantized_path(self) -> Path:
+        """Caminho da versão INT8 do classificador."""
+        return self.models_dir / "model.int8.onnx"
 
     @property
     def decision_path(self) -> Path:

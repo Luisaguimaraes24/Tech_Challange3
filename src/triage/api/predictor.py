@@ -98,6 +98,72 @@ class SklearnBackend(InferenceBackend):
         return self._pipeline.predict_proba([text])
 
 
+class OnnxBackend(InferenceBackend):
+    """Inferência com o classificador exportado para ONNX Runtime.
+
+    A vetorização continua no scikit-learn: só o classificador atravessa o ONNX. A
+    justificativa está em [`export_onnx.py`](../model/export_onnx.py) — converter o
+    pipeline inteiro é mais rápido, mas altera a classificação de 2% dos laudos, porque
+    a tokenização do ONNX não reproduz a do scikit-learn.
+
+    Consequência honesta dessa escolha: o scikit-learn permanece na imagem de inferência,
+    então a otimização rende tempo, não tamanho de container.
+    """
+
+    def __init__(self, model_path: Path, onnx_path: Path, name: str = "onnx") -> None:
+        """Carrega o vetorizador e a sessão de inferência.
+
+        Args:
+            model_path: Pipeline scikit-learn, do qual se aproveita o vetorizador.
+            onnx_path: Grafo ONNX do classificador.
+            name: Nome do backend, usado nos rótulos de métrica.
+
+        Raises:
+            FileNotFoundError: Se algum dos artefatos não existir.
+        """
+        import onnxruntime
+
+        for caminho in (model_path, onnx_path):
+            if not caminho.exists():
+                raise FileNotFoundError(
+                    f"Artefato não encontrado em {caminho}. Rode `make train` e `make onnx`."
+                )
+
+        self.name = name
+        self.model_path = onnx_path
+        pipeline = joblib.load(model_path)
+        self._vectorizer = pipeline.named_steps["tfidf"]
+        self._classes = [int(code) for code in pipeline.classes_]
+
+        # Um único thread por sessão: a escala é horizontal, e deixar o ONNX abrir um
+        # pool interno faria os workers competirem entre si sob carga concorrente.
+        opcoes = onnxruntime.SessionOptions()
+        opcoes.intra_op_num_threads = 1
+        opcoes.inter_op_num_threads = 1
+        self._session = onnxruntime.InferenceSession(
+            str(onnx_path), sess_options=opcoes, providers=["CPUExecutionProvider"]
+        )
+        self._input_name = self._session.get_inputs()[0].name
+        logger.info("Sessão ONNX carregada de %s", onnx_path)
+
+    @property
+    def condition_classes(self) -> list[int]:
+        """Códigos de condição, na ordem das colunas de probabilidade."""
+        return self._classes
+
+    def predict_proba(self, text: str) -> np.ndarray:
+        """Classifica um laudo vetorizando em Python e inferindo em ONNX.
+
+        Args:
+            text: Texto do laudo.
+
+        Returns:
+            Matriz `(1, n_condicoes)` de probabilidades.
+        """
+        features = self._vectorizer.transform([text]).toarray().astype(np.float32)
+        return np.asarray(self._session.run(None, {self._input_name: features})[1])
+
+
 class Predictor:
     """Fachada usada pela API para transformar texto em resultado de triagem."""
 
@@ -136,9 +202,16 @@ class Predictor:
 
         if backend_name == "sklearn":
             backend: InferenceBackend = SklearnBackend(settings.sklearn_model_path)
+        elif backend_name == "onnx":
+            backend = OnnxBackend(settings.sklearn_model_path, settings.onnx_model_path)
+        elif backend_name == "onnx-int8":
+            backend = OnnxBackend(
+                settings.sklearn_model_path, settings.onnx_quantized_path, name="onnx-int8"
+            )
         else:
             raise ValueError(
-                f"Backend de inferência desconhecido: {backend_name!r}. Disponível: 'sklearn'."
+                f"Backend de inferência desconhecido: {backend_name!r}. "
+                "Disponíveis: 'sklearn', 'onnx', 'onnx-int8'."
             )
 
         metrics = _load_metrics(settings.metrics_path)
