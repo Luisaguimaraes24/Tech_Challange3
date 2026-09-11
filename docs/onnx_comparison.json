@@ -1,0 +1,49 @@
+{
+  "referencia": "sklearn",
+  "iteracoes_por_execucao": 500,
+  "repeticoes": 7,
+  "n_laudos": 100,
+  "backends": {
+    "sklearn": {
+      "p50": {
+        "mediana": 0.735,
+        "min": 0.725,
+        "max": 0.772
+      },
+      "p95": {
+        "mediana": 0.883,
+        "min": 0.845,
+        "max": 0.91
+      },
+      "p99": {
+        "mediana": 1.012,
+        "min": 0.961,
+        "max": 1.044
+      },
+      "execucoes": 7
+    },
+    "onnx": {
+      "p50": {
+        "mediana": 0.573,
+        "min": 0.568,
+        "max": 0.618
+      },
+      "p95": {
+        "mediana": 0.692,
+        "min": 0.678,
+        "max": 0.742
+      },
+      "p99": {
+        "mediana": 0.782,
+        "min": 0.773,
+        "max": 0.91
+      },
+      "execucoes": 7,
+      "ganho": {
+        "p50": 1.283,
+        "p95": 1.276,
+        "p99": 1.294
+      }
+    }
+  }
+}

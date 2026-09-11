@@ -1,0 +1,13 @@
+{
+  "n": 2888,
+  "concordancia": 1.0,
+  "divergencias": 0,
+  "max_diff_probabilidade": 1.66e-07,
+  "exemplos_divergentes": [],
+  "opset": 18,
+  "n_features": 10000,
+  "artefatos_kb": {
+    "model.pkl": 786.0,
+    "onnx": 244.6
+  }
+}
