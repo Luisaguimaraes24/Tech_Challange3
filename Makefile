@@ -67,6 +67,14 @@ dag:  ## Dispara a DAG de treino e acompanha o resultado
 load:  ## Gera carga na API para popular o dashboard (60s, 8 clientes)
 	$(PY) scripts/load_test.py --duration 60 --concurrency 8 --output docs/load_test.json
 
+screenshot:  ## Captura o dashboard do Grafana (rode com `make load` em paralelo)
+	@mkdir -p docs/img
+	google-chrome --headless --disable-gpu --no-sandbox --hide-scrollbars \
+		--window-size=1600,1000 --virtual-time-budget=25000 \
+		--screenshot=docs/img/grafana-dashboard.png \
+		"http://localhost:3000/d/triage-observability/x?kiosk&from=now-5m&to=now"
+	@echo "Capturado em docs/img/grafana-dashboard.png"
+
 validate-dag:  ## Verifica que a DAG carrega, sem subir o Airflow
 	$(UV) run --isolated --no-project --with "apache-airflow==$(AIRFLOW_VERSION)" \
 		--python $(PYTHON_VERSION) python scripts/validate_dag.py

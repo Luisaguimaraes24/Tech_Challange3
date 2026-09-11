@@ -300,10 +300,12 @@ As cores não são decorativas: urgência é **estado**, então usa a paleta de 
 (verde/âmbar/vermelho, na ordem da severidade); séries que são **identidade** usam a
 paleta categórica em ordem fixa, validada para daltonismo. Nenhum painel usa dois eixos y.
 
+![Dashboard de operação no Grafana](docs/img/grafana-dashboard.png)
+
 ### Gerando carga
 
 ```bash
-python scripts/load_test.py --duration 60 --concurrency 8
+make load        # 60s de carga, 8 clientes simultâneos
 ```
 
 Um dashboard sem tráfego mostra linhas retas em zero. O gerador usa laudos reais do split

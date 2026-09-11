@@ -1,20 +1,20 @@
 {
-  "requisicoes": 21196,
-  "duracao_s": 60.01,
-  "concorrencia": 8,
-  "vazao_rps": 353.2,
-  "p50_ms": 21.743,
-  "p95_ms": 31.116,
-  "p99_ms": 37.368,
-  "media_ms": 22.565,
+  "requisicoes": 30068,
+  "duracao_s": 53.1,
+  "concorrencia": 6,
+  "vazao_rps": 566.2,
+  "p50_ms": 9.301,
+  "p95_ms": 12.885,
+  "p99_ms": 18.519,
+  "media_ms": 9.738,
   "status": {
-    "200": 20156,
-    "422": 1040
+    "422": 1490,
+    "200": 28578
   },
   "urgencias": {
-    "urgente": 12272,
-    "normal": 2514,
-    "atencao": 5370
+    "urgente": 17300,
+    "normal": 3899,
+    "atencao": 7379
   },
   "falhas_de_conexao": 0
 }

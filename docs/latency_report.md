@@ -1,7 +1,9 @@
 # Relatório de Latência
 
-> Linha de base medida na Etapa 1. A comparação com o modelo otimizado em ONNX entra na
-> Etapa 4, neste mesmo documento.
+> Documento acumulativo. As seções abaixo estão em ordem cronológica: a **linha de base**
+> é a medição da Etapa 1, feita com o modelo de 50.000 features servido por scikit-learn,
+> e é mantida como referência histórica — **não** descreve a configuração atual. Os
+> números do sistema como ele está hoje ficam na seção **Etapa 4 — Otimização**, no fim.
 
 ## Ambiente de medição
 
