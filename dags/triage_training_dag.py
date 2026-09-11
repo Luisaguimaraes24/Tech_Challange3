@@ -13,7 +13,8 @@ degradar um serviço ao longo de meses.
 
 Ordem das tarefas:
 
-    ingest_data -> prepare_dataset -> train_model -> validate_model -> publish_model
+    ingest_data -> prepare_dataset -> train_model -> validate_model -> export_to_onnx
+                                                                    -> publish_model
 """
 
 from __future__ import annotations
@@ -34,9 +35,14 @@ SERVING_DIR = Path("/opt/airflow/models")
 STAGING_DIR = SERVING_DIR / "staging"
 """Área de preparo: o treino escreve aqui e nada é servido a partir daqui."""
 
-PUBLISHED_ARTIFACTS = ("model.pkl", "decision.json", "metrics.json")
-"""Artefatos promovidos juntos. O modelo e sua regra de decisão precisam vir do mesmo
-treino: um limiar calibrado para um modelo não vale para outro."""
+PUBLISHED_ARTIFACTS = ("model.pkl", "model.onnx", "decision.json", "metrics.json")
+"""Artefatos promovidos juntos.
+
+Modelo, grafo ONNX, regra de decisão e métricas vêm do mesmo treino e são publicados em
+bloco. Um limiar calibrado para um modelo não vale para outro, e um grafo ONNX exportado
+de um vetorizador antigo produziria features com outro vocabulário — o serviço
+classificaria com um Frankenstein de duas gerações.
+"""
 
 DEFAULT_ARGS = {
     "owner": "mlet-fase3",
@@ -173,6 +179,51 @@ def triage_training():
         return metrics
 
     @task
+    def export_to_onnx(metrics: dict) -> dict:
+        """Exporta o classificador para ONNX e verifica a paridade com o original.
+
+        A verificação faz parte do passo, não é opcional: um grafo que classifica
+        diferente do modelo validado não pode ser publicado, por mais rápido que seja.
+
+        Args:
+            metrics: Métricas já aprovadas no portão de qualidade.
+
+        Returns:
+            Relatório de paridade da exportação.
+
+        Raises:
+            AirflowFailException: Se a paridade ficar abaixo do limiar.
+        """
+        from triage.data.loader import TEXT_COLUMN, load_split
+        from triage.model.export_onnx import PARITY_THRESHOLD, check_parity, export
+
+        export(
+            model_path=STAGING_DIR / "model.pkl",
+            onnx_path=STAGING_DIR / "model.onnx",
+            quantized_path=STAGING_DIR / "model.int8.onnx",
+        )
+
+        relatorio = check_parity(
+            load_split("test")[TEXT_COLUMN].tolist(),
+            model_path=STAGING_DIR / "model.pkl",
+            onnx_path=STAGING_DIR / "model.onnx",
+        )
+        logger.info(
+            "Paridade ONNX: %.6f em %d laudos (maior diferença %.1e)",
+            relatorio["concordancia"],
+            relatorio["n"],
+            relatorio["max_diff_probabilidade"],
+        )
+
+        if relatorio["concordancia"] < PARITY_THRESHOLD:
+            raise AirflowFailException(
+                f"Paridade ONNX {relatorio['concordancia']:.6f} abaixo de "
+                f"{PARITY_THRESHOLD}: o grafo exportado não reproduz o modelo treinado."
+            )
+
+        return relatorio
+
+    @task
     def publish_model(metrics: dict) -> list[str]:
         """Promove os artefatos da área de preparo para o volume servido.
 
@@ -211,7 +262,13 @@ def triage_training():
     # tenha confirmado que os dados carregam e estão íntegros.
     dataset >> metrics
 
-    publish_model(validate_model(metrics))
+    aprovado = validate_model(metrics)
+    exportacao = export_to_onnx(aprovado)
+
+    # A publicação espera a exportação: os artefatos vão para produção em bloco, e um
+    # ONNX reprovado na paridade impede o conjunto inteiro de ser promovido.
+    publicacao = publish_model(aprovado)
+    exportacao >> publicacao
 
 
 dag_instance = triage_training()

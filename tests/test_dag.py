@@ -21,6 +21,7 @@ TAREFAS_ESPERADAS = {
     "prepare_dataset",
     "train_model",
     "validate_model",
+    "export_to_onnx",
     "publish_model",
 }
 
