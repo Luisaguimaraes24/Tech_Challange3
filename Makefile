@@ -41,6 +41,12 @@ test:  ## Roda a suíte de testes com cobertura
 train:  ## Treina o classificador de urgência
 	$(PY) -m triage.model.train
 
+onnx:  ## Exporta o classificador para ONNX e verifica a paridade
+	$(PY) -m triage.model.export_onnx --report docs/onnx_parity.json
+
+compare:  ## Compara a latência dos backends (execuções repetidas e intercaladas)
+	$(PY) -m triage.benchmark.compare --repeats 7 --output docs/onnx_comparison.json
+
 # O Airflow precisa escrever nos bind mounts ./data e ./models, que pertencem ao
 # usuário do host; sem isso o container roda como uid 50000 e a DAG falha ao gravar.
 export AIRFLOW_UID := $(shell id -u)

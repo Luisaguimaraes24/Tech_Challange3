@@ -1,7 +1,7 @@
 # Model Card — Classificador de Urgência de Laudos
 
 > Documento vivo. Atualizado a cada mudança de modelo ou de regra de decisão.
-> Última atualização: Etapa 1.
+> Última atualização: Etapa 4.
 
 ## Identificação
 
@@ -10,9 +10,10 @@
 | Nome | `triage-urgencia` |
 | Versão | 0.1.0 |
 | Tarefa | Classificação de texto em 3 níveis de urgência |
-| Arquitetura | `TfidfVectorizer` (1-2 gramas, 50.000 termos) + `LogisticRegression` |
-| Artefato | `models/model.pkl` (4,0 MB) + `models/decision.json` |
+| Arquitetura | `TfidfVectorizer` (1-2 gramas, 10.000 termos) + `LogisticRegression` |
+| Artefato | `models/model.pkl` (786 KB) + `models/model.onnx` (245 KB) + `models/decision.json` |
 | Alvo do treino | **5 condições médicas**, projetadas em urgência pela regra de decisão |
+| Motor de inferência | ONNX Runtime (classificador), scikit-learn (vetorização) |
 | Semente | 42 |
 
 ## Uso pretendido
@@ -70,13 +71,37 @@ Outras variantes testadas e descartadas por não pagarem o custo: char n-grams (
 com 3× o tempo de treino), voting `LogReg`+`ComplementNB` (0,5878), `ComplementNB` puro
 (0,5533), `LinearSVC` calibrado (0,5073) e varreduras de `C`, `min_df` e `ngram_range`.
 
+### Poda do vocabulário
+
+O vocabulário foi reduzido de 50.000 para 10.000 termos, também por validação cruzada, e o
+corte **melhorou** o modelo:
+
+| max_features | f1-macro (CV, 3 folds) |
+|---|---|
+| 50.000 | 0,5900 |
+| 20.000 | 0,5933 |
+| **10.000** | **0,5936** |
+| 5.000 | 0,5917 |
+
+A cauda de 40.000 termos raros contribuía mais ruído que sinal. O artefato ficou 5× menor
+(4.059 KB → 786 KB). O que **não** melhorou foi a latência: o custo do TF-IDF é dominado
+pela tokenização, proporcional ao tamanho do documento, não ao do vocabulário.
+
+### Motor de inferência
+
+O classificador é servido pelo ONNX Runtime; a vetorização permanece no scikit-learn. A
+exportação do pipeline inteiro seria 2,5× mais rápida, mas classifica 2% dos laudos de
+forma diferente — a tokenização do ONNX não reproduz a do scikit-learn. A exportação
+parcial tem **paridade exata** (2.888 de 2.888 laudos idênticos) e rende 1,34× no tempo de
+modelo. Ver [latency_report.md](latency_report.md).
+
 ### Regra de decisão
 
 Duas partes, aplicadas fora do modelo (em [`decision.py`](../src/triage/model/decision.py)):
 
 1. **condição dominante** — a urgência é a da condição mais provável;
 2. **trava de urgência** — se a probabilidade acumulada nas condições urgentes passa de
-   **0,30**, o laudo é marcado como urgente mesmo sem nenhuma condição urgente dominante.
+   **0,29**, o laudo é marcado como urgente mesmo sem nenhuma condição urgente dominante.
 
 O limiar **não é escolhido à mão**: é calibrado a cada treino, sobre probabilidades
 out-of-fold, como o maior valor que ainda atinge o recall-alvo de **0,90** para `urgente`.
@@ -90,16 +115,16 @@ um hospital precisa poder auditar em que ponto de operação a triagem está rod
 
 | Métrica | Valor |
 |---|---|
-| **Recall de `urgente`** | **0,8986** |
-| Precisão de `urgente` | 0,6372 |
-| Acurácia | 0,6170 |
-| f1-macro | 0,5614 |
+| **Recall de `urgente`** | **0,9002** |
+| Precisão de `urgente` | 0,6365 |
+| Acurácia | 0,6174 |
+| f1-macro | 0,5612 |
 
 | Classe | Precisão | Recall | f1 | Suporte |
 |---|---|---|---|---|
-| `urgente` | 0,637 | 0,899 | 0,746 | 1.243 |
-| `atencao` | 0,562 | 0,656 | 0,606 | 684 |
-| `normal` | 0,643 | 0,225 | 0,333 | 961 |
+| `urgente` | 0,636 | 0,900 | 0,746 | 1.243 |
+| `atencao` | 0,562 | 0,658 | 0,607 | 684 |
+| `normal` | 0,648 | 0,223 | 0,332 | 961 |
 
 ### Como ler estes números
 
@@ -108,7 +133,7 @@ um hospital precisa poder auditar em que ponto de operação a triagem está rod
 um laudo urgente como normal deixa um paciente esperando, enquanto o erro oposto apenas
 consome tempo de um revisor. O sistema captura **90% dos laudos urgentes**.
 
-**O preço disso é super-triagem, e ele é alto.** O recall de `normal` é 0,225 — três em
+**O preço disso é super-triagem, e ele é alto.** O recall de `normal` é 0,223 — três em
 cada quatro laudos de rotina são elevados para uma faixa mais urgente. Numa operação real,
 isso significa uma fila prioritária inflada, e o ponto de operação teria que ser negociado
 com o serviço, não decidido no código. É exatamente por isso que o alvo de recall é
@@ -124,7 +149,7 @@ do erro não é do modelo, é do rótulo.
 |---|---|---|---|---|
 | Treino direto em 3 classes (versão anterior) | 0,5600 | 0,5748 | 0,6814 | 0,6960 |
 | 5 condições, sem trava | 0,5810 | 0,6080 | 0,7643 | 0,6859 |
-| **5 condições, trava em 0,30** | 0,5614 | 0,6170 | **0,8986** | 0,6372 |
+| **5 condições, trava em 0,29** | 0,5612 | 0,6174 | **0,9002** | 0,6365 |
 
 A trava troca 5,9 pontos de precisão em `urgente` por 13,4 pontos de recall. Numa triagem,
 essa troca é favorável; num sistema de cobrança, seria o contrário.
@@ -138,10 +163,11 @@ O treino falha (código de saída 1) e a DAG de retreino não publica o modelo s
 
 ## Desempenho
 
-| Medição | p50 | p95 | p99 |
-|---|---|---|---|
-| Inferência em processo | 0,895 ms | 1,073 ms | 1,208 ms |
-| Requisição HTTP (container) | 2,071 ms | 3,656 ms | 4,478 ms |
+| Medição | p50 | p95 |
+|---|---|---|
+| Inferência em processo (ONNX) | 0,562 ms | 0,683 ms |
+| Inferência em processo (scikit-learn) | 0,736 ms | 0,860 ms |
+| Requisição HTTP, 16 clientes simultâneos | 28,90 ms | 33,81 ms |
 
 Detalhes e metodologia em [latency_report.md](latency_report.md).
 
@@ -151,7 +177,8 @@ Detalhes e metodologia em [latency_report.md](latency_report.md).
 |---|---|
 | Rótulo de urgência é derivado, não clínico | Documentado; exigiria validação com especialista |
 | Corpus é literatura científica, não laudo real | Documentado; substituição por notas clínicas é o próximo passo |
-| Super-triagem alta (recall de `normal` = 0,225) | Aceito e configurável pelo ponto de operação |
+| Super-triagem alta (recall de `normal` = 0,223) | Aceito e configurável pelo ponto de operação |
+| Paridade ONNX depende do vocabulário do treino | A DAG reexporta e reverifica a cada retreino; paridade abaixo de 0,999 reprova a publicação |
 | Sem detecção de deriva de dados | A instrumentação da Etapa 3 expõe a distribuição de urgências preditas, que serve de sinal barato |
 | Modelo em inglês | O corpus é em inglês; laudos em português exigiriam retreino completo |
 | Sem viés medido por subgrupo | O corpus não traz atributos demográficos, então não há como medir |

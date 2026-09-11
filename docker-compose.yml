@@ -18,7 +18,11 @@ services:
       - "8000:8000"
     environment:
       TRIAGE_MODELS_DIR: /app/models
-      TRIAGE_MODEL_BACKEND: ${TRIAGE_MODEL_BACKEND:-sklearn}
+      # A stack serve o backend otimizado: a DAG publica o `.pkl` e o `.onnx` em bloco,
+      # então os dois estão sempre presentes aqui. O default do pacote continua sendo
+      # `sklearn`, para que um `docker run` avulso com apenas o `.pkl` também funcione.
+      # Trocar para `sklearn` aqui é como comparar os dois motores ao vivo.
+      TRIAGE_MODEL_BACKEND: ${TRIAGE_MODEL_BACKEND:-onnx}
       TRIAGE_LOG_LEVEL: ${TRIAGE_LOG_LEVEL:-INFO}
     volumes:
       # Somente leitura: quem publica modelo é a DAG, nunca o serviço de inferência.

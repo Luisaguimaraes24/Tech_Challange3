@@ -14,7 +14,7 @@ Sistema de triagem que classifica a urgência de laudos médicos em `normal`, `a
 | 1 | Decisão arquitetural e API FastAPI em Docker | ✅ concluída |
 | 2 | CI/CD (GitHub Actions) e DAG Airflow | ✅ concluída |
 | 3 | Monitoramento (Prometheus + Grafana) | ✅ concluída |
-| 4 | Otimização de latência (ONNX) e entrega | ⬜ |
+| 4 | Otimização de latência (ONNX) e entrega | ✅ concluída |
 
 ---
 
@@ -83,9 +83,11 @@ O corpus rotula **condições médicas** (5 classes), não urgência. A urgênci
 
 ```bash
 make train       # treina, calibra a trava de urgência e grava os artefatos em models/
+make onnx        # exporta o classificador para ONNX e verifica a paridade
+make compare     # compara a latência dos backends
 ```
 
-Pipeline `TfidfVectorizer` (1-2 gramas, 50.000 termos) + `LogisticRegression` com
+Pipeline `TfidfVectorizer` (1-2 gramas, 10.000 termos) + `LogisticRegression` com
 `class_weight="balanced"`.
 
 **O treino tem como alvo as 5 condições médicas, não os 3 níveis de urgência.** Colapsar
@@ -107,23 +109,27 @@ Ele viaja junto do artefato em `models/decision.json` e é exposto em `/model-in
 
 | Métrica | Valor |
 |---|---|
-| **Recall de `urgente`** | **0,8986** |
-| Precisão de `urgente` | 0,6372 |
-| Acurácia | 0,6170 |
-| f1-macro | 0,5614 |
+| **Recall de `urgente`** | **0,9002** |
+| Precisão de `urgente` | 0,6365 |
+| Acurácia | 0,6174 |
+| f1-macro | 0,5612 |
 
 **Recall de `urgente` é a métrica de decisão**, não a acurácia nem o f1-macro. As duas
 últimas tratam todos os erros como equivalentes, o que é falso numa triagem: um laudo
 urgente classificado como normal deixa um paciente esperando, enquanto o erro oposto só
 consome tempo de um revisor.
 
-O preço é super-triagem: o recall de `normal` é 0,225, ou seja, a fila prioritária fica
+O preço é super-triagem: o recall de `normal` é 0,223, ou seja, a fila prioritária fica
 inflada de falsos alarmes. Esse ponto de operação é uma decisão institucional, e por isso
 mora na configuração e não no código. Análise completa em
 [docs/model_card.md](docs/model_card.md).
 
 O treino falha (exit 1) se o recall de `urgente` cair abaixo de 0,85 ou o f1-macro abaixo
 de 0,52 — são os gates que impedem a DAG de retreino de publicar um modelo pior.
+
+O vocabulário foi podado de 50.000 para 10.000 termos por validação cruzada, e o corte
+**melhorou** o f1-macro (0,5900 → 0,5936): a cauda de termos raros contribuía mais ruído
+que sinal. O artefato ficou 5× menor.
 
 > O corpus é composto por **abstracts de artigos científicos** (~1.200 caracteres), não por
 > notas clínicas. O modelo espera texto desse formato; frases curtas de prontuário estão
@@ -186,6 +192,13 @@ make down        # derruba tudo
 | Airflow | http://localhost:8080 | `admin` / `admin` |
 | Prometheus | http://localhost:9090 | — |
 | Grafana | http://localhost:3000 | `admin` / `admin` |
+
+A stack sobe servindo o backend **ONNX**. Para comparar os motores ao vivo — útil na
+demonstração — basta trocar a variável:
+
+```bash
+TRIAGE_MODEL_BACKEND=sklearn docker compose up -d api
+```
 
 A API monta `./models` **somente leitura** e o Airflow monta o mesmo diretório com
 escrita. Quem publica modelo é a DAG, nunca o serviço de inferência — é a mesma fronteira
@@ -310,7 +323,40 @@ Linha de base medida na Etapa 1, com 1.000 requisições sobre laudos reais do s
 | Modelo (em processo) | 0,895 ms | 1,073 ms | 1,208 ms | 1.103 req/s |
 | HTTP (container Docker) | 2,071 ms | 3,656 ms | 4,478 ms | 434 req/s |
 
-Só que **essa medição usa um cliente por vez**, e isso muda tudo. Sob concorrência:
+### Otimização (Etapa 4)
+
+Duas mudanças, cada uma medida em **sete execuções intercaladas** por configuração —
+com uma medição única por backend, um ganho de 1,3× seria indistinguível da variância de
+40% entre execuções documentada no relatório.
+
+| Configuração | p50 | p95 | Ganho |
+|---|---|---|---|
+| scikit-learn, 50.000 features (antes) | 0,751 ms [0,731–0,801] | 0,893 ms | 1,00× |
+| scikit-learn, 10.000 features (poda) | 0,736 ms [0,719–0,758] | 0,860 ms | 1,02× |
+| **ONNX, 10.000 features** | **0,562 ms** [0,555–0,573] | **0,683 ms** | **1,34×** |
+
+Os intervalos não se sobrepõem — o mínimo do scikit-learn é maior que o máximo do ONNX,
+então a diferença é real.
+
+**A exportação do pipeline inteiro para ONNX seria 2,5× mais rápida, e foi rejeitada.** A
+tokenização do ONNX não reproduz a do scikit-learn: o grafo completo classifica **56 dos
+2.888 laudos de teste com urgência diferente**. Um ganho obtido às custas de mudar o
+critério de triagem não é otimização, é servir outro modelo sem validação. Exportamos
+apenas o classificador, com paridade **exata** (2.888 de 2.888 idênticos).
+
+Três coisas que não saíram como o esperado, e estão registradas no relatório: a poda de
+vocabulário **não** acelerou nada (o custo do TF-IDF é tokenização, proporcional ao
+documento, não ao vocabulário — o ganho dela foi artefato 5× menor); a imagem **não**
+encolheu (o scikit-learn continua nela, fazendo a vetorização); e a quantização INT8 **não
+se aplica** a este modelo — o grafo é um único operador `LinearClassifier` do domínio
+`ai.onnx.ml`, para o qual não existe equivalente INT8.
+
+Ponta a ponta, o ganho de 1,34× no modelo vira **0% a 11%** na resposta — e some sob
+concorrência alta, onde o que domina é fila, não computação.
+
+### Sob concorrência
+
+Só que **a medição de referência usa um cliente por vez**, e isso muda tudo:
 
 | Clientes simultâneos | p50 | p95 | p99 |
 |---|---|---|---|
@@ -325,6 +371,18 @@ Escalar aqui é horizontal, não otimizar o modelo.
 
 Metodologia, o custo medido da própria instrumentação e as implicações para a Etapa 4 em
 [docs/latency_report.md](docs/latency_report.md).
+
+## Vídeo
+
+Demonstração em método STAR: *(link a adicionar após a gravação)*
+
+## Documentação
+
+| Documento | Conteúdo |
+|---|---|
+| [deploy_architecture.md](docs/deploy_architecture.md) | Batch vs. real-time, provedores avaliados, topologia, LGPD |
+| [model_card.md](docs/model_card.md) | Dados, modelagem, métricas, limitações e riscos |
+| [latency_report.md](docs/latency_report.md) | Metodologia de medição, comparativo sklearn vs. ONNX, concorrência |
 
 ## Licença
 

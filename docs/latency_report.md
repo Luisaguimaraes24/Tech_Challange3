@@ -132,5 +132,121 @@ torna a comparação informativa:
 4. **varredura por tamanho de documento**, em vez de um único ponto de operação.
 
 Reportar um ganho pequeno com honestidade vale mais do que escolher uma medição favorável.
-A comparação completa — sklearn vs. ONNX, com paridade de predições verificada — entra
-aqui na Etapa 4.
+
+---
+
+# Etapa 4 — Otimização
+
+## O que foi tentado, e o que foi rejeitado
+
+A otimização óbvia era exportar o **pipeline inteiro** para ONNX: `TfidfVectorizer` e
+`LogisticRegression` num só grafo, eliminando a travessia Python. Ela funciona e é
+rápida — **2,0× a 2,5×**. Foi rejeitada.
+
+O motivo é a tokenização. O `TfidfVectorizer` tokeniza em Python com uma expressão
+regular; o operador equivalente do ONNX reimplementa isso em C++, e as duas não
+coincidem. Medido no split de teste inteiro:
+
+| Configuração testada | Paridade | Ganho | Veredito |
+|---|---|---|---|
+| (1,2) gramas, tokenização padrão | 0,9806 | 2,48× | ❌ 56 laudos classificados diferente |
+| (1,2) gramas, `token_pattern` que o ONNX digere | 0,9841 | 2,26× | ❌ |
+| Apenas unigramas | 0,9965 | 4,20× | ❌ 10 laudos diferentes |
+| Vocabulário podado a 5.000 | 0,9868 | 7,98× | ❌ |
+
+**Nenhuma configuração atinge o limiar de paridade de 0,999** — definido antes de medir,
+justamente para não virar justificativa depois. Um ganho de 2,5× que muda a urgência
+atribuída a 2% dos laudos não é uma otimização: é servir um modelo diferente do que foi
+validado, sem avisar ninguém. Num sistema de triagem, é trocar o critério clínico em
+silêncio.
+
+## O que foi entregue
+
+Duas mudanças, cada uma medida separadamente.
+
+**1. Poda do vocabulário: 50.000 → 10.000 termos.** Escolhida por validação cruzada no
+split de treino, e o corte **melhorou** o modelo: f1-macro 0,5936 contra 0,5900 do
+vocabulário completo. A cauda de 40.000 termos raros contribuía mais ruído que sinal.
+
+**2. Exportação apenas do classificador para ONNX.** A vetorização continua no
+scikit-learn; o ONNX Runtime recebe o vetor de features pronto. A paridade passa a ser
+**exata** — 2.888 de 2.888 laudos idênticos, diferença máxima de probabilidade de
+1,7e-07, que é o arredondamento de float32.
+
+A poda é o que torna o ONNX viável. Com os 50.000 termos originais, densificar o vetor
+esparso para alimentar o grafo custava mais do que ele economizava, e a "otimização"
+ficava **mais lenta** que o original (0,91×).
+
+## Resultado — latência do modelo
+
+Sete execuções independentes por configuração, **intercaladas** (não em bloco, para que
+variação de carga da máquina ao longo do tempo não seja atribuída a um dos candidatos),
+400 medições por execução. Reportada a mediana das execuções, com o intervalo observado:
+
+| Configuração | p50 | p95 | Ganho |
+|---|---|---|---|
+| scikit-learn, 50.000 features (antes) | 0,751 ms [0,731–0,801] | 0,893 ms | 1,00× |
+| scikit-learn, 10.000 features (poda) | 0,736 ms [0,719–0,758] | 0,860 ms | 1,02× |
+| **ONNX, 10.000 features (poda + ONNX)** | **0,562 ms** [0,555–0,573] | **0,683 ms** | **1,34×** |
+
+Os intervalos de sklearn e ONNX **não se sobrepõem** — o mínimo do scikit-learn (0,731 ms)
+é maior que o máximo do ONNX (0,573 ms). A diferença é real, não ruído. Essa verificação
+só é possível porque as execuções foram repetidas; com uma medição única por backend, um
+ganho de 1,34× seria indistinguível da variância de 40% documentada acima.
+
+**A poda sozinha não acelerou nada** (1,02×, dentro do ruído). Isso contraria a
+expectativa inicial e vale registrar: o custo do TF-IDF é dominado pela tokenização, que
+é proporcional ao **tamanho do documento**, não ao tamanho do vocabulário. O vocabulário
+só afeta buscas em tabela hash. O ganho da poda foi outro — um artefato 5× menor.
+
+## Resultado — ponta a ponta, sob concorrência
+
+| Clientes | sklearn p50 | ONNX p50 | sklearn p95 | ONNX p95 |
+|---|---|---|---|---|
+| 1 | 1,84 ms | 1,81 ms | 2,50 ms | 4,23 ms |
+| 8 | 13,36 ms | 11,87 ms | 15,75 ms | 14,83 ms |
+| 16 | 29,79 ms | 28,90 ms | 34,13 ms | 33,81 ms |
+
+**O ganho de 1,34× no modelo vira 0% a 11% na resposta ao usuário**, e some quase
+inteiramente sob concorrência alta. Era a previsão registrada na Etapa 1, e ela se
+confirmou: o modelo é minoria do tempo de resposta, e sob carga o que domina é fila, não
+computação. Otimizar o modelo não resolve um problema de enfileiramento — escalar
+horizontalmente resolve.
+
+## Footprint
+
+| Medida | scikit-learn | ONNX |
+|---|---|---|
+| Artefato do modelo | 786 KB (`model.pkl`) | 245 KB (`model.onnx`) + o `.pkl` para o TF-IDF |
+| Memória residente do container | 121,5 MiB | 128,1 MiB |
+| Tamanho da imagem | 731 MB | 731 MB |
+
+Aqui a expectativa da Etapa 1 **não se confirmou**. Esperávamos enxugar a imagem
+eliminando o scikit-learn do container de inferência; como a vetorização permaneceu no
+scikit-learn, ele continua na imagem e o tamanho não mudou. Pior: o caminho ONNX consome
+**7 MiB a mais** de memória, porque carrega o vetorizador e a sessão de inferência ao
+mesmo tempo. O ganho desta etapa é tempo de modelo, não recurso.
+
+## Quantização INT8: avaliada e não aplicável
+
+A quantização dinâmica foi tentada e **não se aplica a este modelo** — por um motivo
+estrutural, não por erro de configuração. O `skl2onnx` exporta a regressão logística como
+um único operador `LinearClassifier` do domínio `ai.onnx.ml`. O quantizador dinâmico do
+ONNX Runtime opera sobre `MatMul`, `Conv`, `Gather`, `LSTM` e afins; não existe
+substituto INT8 para `LinearClassifier`. Não há o que quantizar.
+
+O diagnóstico é coerente com o que a técnica se propõe: quantização paga em modelos
+dominados por multiplicações de matriz grandes. Uma camada linear de 3 × 10.000
+parâmetros não é um desses. A tentativa permanece no código, com o motivo no log, para
+que fique claro que a técnica foi avaliada e descartada com evidência — e não esquecida.
+
+## Resumo
+
+| | Antes | Depois |
+|---|---|---|
+| Vocabulário | 50.000 termos | 10.000 termos |
+| f1-macro (CV) | 0,5900 | 0,5936 |
+| Artefato | 4.059 KB | 786 KB + 245 KB |
+| Latência do modelo (p50) | 0,751 ms | 0,562 ms (**1,34×**) |
+| Latência HTTP, 16 clientes (p95) | 34,13 ms | 33,81 ms |
+| Paridade de predições | — | 1,000000 |
