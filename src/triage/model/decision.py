@@ -195,14 +195,18 @@ def calibrate_threshold(
         condition_classes: Códigos de condição, na ordem das colunas.
         y_true_urgency: Níveis de urgência verdadeiros.
         recall_target: Recall mínimo desejado para `urgente`, entre 0 e 1.
-        grid: Limiares candidatos. Usa `0.95..0.05` em passos de 0.05 quando omitido.
+        grid: Limiares candidatos. Usa `0.95..0.01` em passos de 0.01 quando omitido.
 
     Returns:
         O limiar escolhido (ou `None` se nenhum atingir o alvo) e a curva completa
         de recall e precisão por limiar, para documentação.
     """
     if grid is None:
-        grid = np.arange(0.95, 0.04, -0.05)
+        # Passo de 0.01, não 0.05. Com a grade grossa a busca pulava o alvo: o limiar
+        # imediatamente acima entregava recall 0.895 e o seguinte, 0.931 — três pontos
+        # de recall além do pedido, pagos com quatro pontos de precisão. Sobrepassar o
+        # alvo não é conservador, é inflar a fila prioritária sem ninguém ter decidido.
+        grid = np.arange(0.95, 0.009, -0.01)
 
     urgent = UrgencyLevel.URGENTE.value
     positives = y_true_urgency == urgent
